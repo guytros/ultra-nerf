@@ -1,3 +1,4 @@
+import imageio
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
@@ -6,9 +7,13 @@ import os
 from config import config_parser
 from load_us import load_us_data
 from model import create_nerf
-from render import get_rays_us_linear
+from render import get_rays_us_linear, render_us, to8b
+from utils import img2mse, show_colorbar
+from tensorflow.keras import backend as K
+
 
 def train():
+
     parser = config_parser()
     args = parser.parse_args()
 

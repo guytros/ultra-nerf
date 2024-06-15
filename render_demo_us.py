@@ -3,6 +3,9 @@
 import os
 
 # os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+from model import create_nerf
+from render import render_us
+
 os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 import tensorflow as tf
 tf.compat.v1.enable_eager_execution()
@@ -13,8 +16,7 @@ import pprint
 import pathlib
 
 import matplotlib.pyplot as plt
-
-import run_ultra_nerf as run_nerf_ultrasound
+from config import config_parser
 from load_us import load_us_data
 
 basedir = './logs'
@@ -23,7 +25,7 @@ expname = 'synthetic_200k'
 config = os.path.join(basedir, expname, 'config.txt')
 print('Args:')
 print(open(config, 'r').read())
-parser = run_nerf_ultrasound.config_parser()
+parser = config_parser()
 model_no = 'model_200000'
 
 args = parser.parse_args('--config {} --ft_path {}'.format(config, os.path.join(basedir, expname, model_no + ".npy")))
@@ -45,7 +47,7 @@ far = args.probe_depth * 0.001
 
 
 # Create nerf model
-_, render_kwargs_test, start, grad_vars, models = run_nerf_ultrasound.create_nerf(args)
+_, render_kwargs_test, start, grad_vars, models = create_nerf(args)
 render_kwargs_test["args"] = args
 bds_dict = {
     'near': tf.cast(near, tf.float32),
@@ -94,7 +96,7 @@ for i, c2w in enumerate(poses):
 
     # run_out = output_dir + str(i) + "/"
     # os.mkdir(run_out)
-    rendering_params = run_nerf_ultrasound.render_us(H, W, sw, sh, c2w=c2w[:3, :4], **render_kwargs_fast)
+    rendering_params = render_us(H, W, sw, sh, c2w=c2w[:3, :4], **render_kwargs_fast)
     imageio.imwrite(output_dir_output + "Generated " + str(1000 + i) + ".png",
                     tf.image.convert_image_dtype(tf.transpose(rendering_params['intensity_map']), tf.uint8))
 

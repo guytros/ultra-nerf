@@ -105,6 +105,13 @@ def render_rays_us(ray_batch,
 
     pts = step + origin
 
+    # TODO: Change to args
+    g_size = 3
+    g_mean = 0.
+    g_variance = 1.
+    g_kernel = gaussian_kernel(g_size, g_mean, g_variance)
+    g_kernel = tf.constant(g_kernel[:, :, tf.newaxis, tf.newaxis], dtype=tf.float32)
+
     # Evaluate model at each point.
     raw = network_query_fn(pts, network_fn)  # [N_rays, N_samples, 5]
     ret = raw2outputs(
