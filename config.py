@@ -3,11 +3,14 @@ def config_parser():
     parser = configargparse.ArgumentParser()
     parser.add_argument('--config', is_config_file=True,
                         help='config file path', default='config_fern.txt')
+    parser.add_argument("--project_name", type=str, help='project_name', default='train_ultra_nerf')
     parser.add_argument("--expname", type=str, help='experiment name')
     parser.add_argument("--basedir", type=str, default='./logs/',
                         help='where to store ckpts and logs')
     parser.add_argument("--datadir", type=str,
                         default='./data/llff/fern', help='input data directory')
+    parser.add_argument("--run_mode", type=str,
+                        default='inference', help='train/inference')
 
     # training options
     parser.add_argument('--n_iters', type=int, default=10000)

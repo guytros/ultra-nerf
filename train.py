@@ -1,3 +1,5 @@
+import argparse
+
 import imageio
 import numpy as np
 import tensorflow as tf
@@ -8,19 +10,12 @@ from config import config_parser
 from load_us import load_us_data
 from model import create_nerf
 from render import get_rays_us_linear, render_us, to8b
-from utils import img2mse, show_colorbar
+from utils import img2mse, show_colorbar, create_log, hybrid_loss, save_weights
 from tensorflow.keras import backend as K
+import wandb
 
 
-def train():
-
-    parser = config_parser()
-    args = parser.parse_args()
-
-    if args.random_seed is not None:
-        print('Fixing random seed', args.random_seed)
-        np.random.seed(args.random_seed)
-        tf.compat.v1.set_random_seed(args.random_seed)
+def train(args: argparse.Namespace):
 
     # Load data
     if args.dataset_type == 'us':
@@ -39,7 +34,7 @@ def train():
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return
 
-    # The poses are not normalized. We scale down the space.
+    # The poses are not (!) normalized. We scale down the space.
     # It is possible to normalize poses and remove scaling.
     scaling = 0.001
     near = 0
@@ -57,22 +52,10 @@ def train():
         render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
-    basedir = args.basedir
-    expname = args.expname
-    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
-    f = os.path.join(basedir, expname, 'args.txt')
-    with open(f, 'w') as file:
-        for arg in sorted(vars(args)):
-            attr = getattr(args, arg)
-            file.write('{} = {}\n'.format(arg, attr))
-    if args.config is not None:
-        f = os.path.join(basedir, expname, 'config.txt')
-        with open(f, 'w') as file:
-            file.write(open(args.config, 'r').read())
+    basedir, expname = create_log(args)
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, models = create_nerf(
-        args)
+    render_kwargs_train, render_kwargs_test, start, grad_vars, models = create_nerf(args)
 
     bds_dict = {
         'near': tf.cast(near, tf.float32),
@@ -85,8 +68,7 @@ def train():
     # Create optimizer
     lrate = args.lrate
     if args.lrate_decay > 0:
-        lrate = tf.keras.optimizers.schedules.ExponentialDecay(lrate,
-                                                               decay_steps=args.lrate_decay * 1000, decay_rate=0.1)
+        lrate = tf.keras.optimizers.schedules.ExponentialDecay(lrate, decay_steps=args.lrate_decay * 1000, decay_rate=0.1)
     optimizer = tf.keras.optimizers.Adam(lrate)
     models['optimizer'] = optimizer
     global_step = tf.compat.v1.train.get_or_create_global_step()
@@ -102,7 +84,9 @@ def train():
         os.path.join(basedir, 'summaries', expname))
     writer.set_as_default()
 
+    # training loop
     for i in tqdm(range(start, N_iters)):
+
         time0 = time.time()
         # Sample random ray batch
         # Random from one image
@@ -114,12 +98,10 @@ def train():
 
         pose = poses[img_i, :3, :4]
         ssim_weight = args.ssim_lambda
-        l2_weight = 1. - ssim_weight
 
         rays_o, rays_d = get_rays_us_linear(H, W, sw, sh, pose)
         batch_rays = tf.stack([rays_o, rays_d], 0)
-        loss = dict()
-        loss_holdout = dict()
+
         #####  Core optimization loop  #####
         with tf.GradientTape() as tape:
             # Make predictions
@@ -128,43 +110,25 @@ def train():
                 retraw=True, **render_kwargs_train)
 
             output_image = rendering_output['intensity_map']
-            if args.loss == 'l2':
-                l2_intensity_loss = img2mse(output_image, target)
-                loss["l2"] = (1., l2_intensity_loss)
-            elif args.loss == 'ssim':
-                ssim_intensity_loss = 1. - tf.image.ssim_multiscale(tf.expand_dims(tf.expand_dims(output_image, 0), -1),
-                                                                    tf.expand_dims(tf.expand_dims(target, 0), -1),
-                                                                    max_val=1.0, filter_size=args.ssim_filter_size,
-                                                                    filter_sigma=1.5, k1=0.01, k2=0.1
-                                                                    )
-                loss["ssim"] = (ssim_weight, ssim_intensity_loss)
-                l2_intensity_loss = img2mse(output_image, target)
-                loss["l2"] = (l2_weight, l2_intensity_loss)
+            loss = hybrid_loss(target_image=target, pred_image=output_image, ssim_filter_size=args.ssim_filter_size,
+                               ssim_weight=args.ssim_lambda, loss_type=args.loss)
+            wandb.log({"train_L2": loss['l2'][1], "train_SSIM": loss['ssim'][1], "train_loss": loss['total'][1]}, step=i)
 
-            total_loss = 0.
-            for loss_value in loss.values():
-                total_loss += loss_value[0] * loss_value[1]
-
-        gradients = tape.gradient(total_loss, grad_vars)
+        gradients = tape.gradient(loss['total'][1], grad_vars)
         optimizer.apply_gradients(zip(gradients, grad_vars))
-        dt = time.time() - time0
+        batch_time = time.time() - time0
 
         #####           end            #####
 
         # Rest is logging
-        def save_weights(net, prefix, i):
-            path = os.path.join(
-                basedir, expname, '{}_{:06d}.npy'.format(prefix, i))
-            np.save(path, net.get_weights())
-            print('saved weights at', path)
 
         if i % args.i_weights == 0:
             for k in models:
-                save_weights(models[k], k, i)
+                save_weights(models[k], k, i, basedir, expname)
 
         if i % args.i_print == 0 or i < 10:
-            print(expname, i, total_loss.numpy(), global_step.numpy())
-            print('iter time {:.05f}'.format(dt))
+            print(expname, i, loss['total'][1].numpy(), global_step.numpy())
+            print('iter time {:.05f}'.format(batch_time))
             with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
                 g_i = 0
                 for t in gradients:
@@ -177,7 +141,7 @@ def train():
                     tf.contrib.summary.scalar(f'train/loss_{l_key}/', l_value[1])
                     tf.contrib.summary.scalar(f'train/penalty_factor_{l_key}/', l_value[0])
                     tf.contrib.summary.scalar(f'train/total_loss_{l_key}/', l_value[0] * l_value[1])
-                tf.contrib.summary.scalar('train/total_loss/', total_loss)
+                tf.contrib.summary.scalar('train/total_loss/', loss['total'][1])
                 print(loss_string)
             if i % args.i_img == 0:
                 # Log a rendered validation view to Tensorboard
@@ -189,24 +153,10 @@ def train():
 
                 # TODO: Duplicaetes the loss calculation. Should be a function.
                 output_image_test = rendering_output_test['intensity_map']
-                if args.loss == 'l2':
-                    l2_intensity_loss = img2mse(output_image_test, target)
-                    loss_holdout["l2"] = (1., l2_intensity_loss)
-                elif args.loss == 'ssim':
-                    ssim_intensity_loss = 1. - tf.image.ssim_multiscale(
-                        tf.expand_dims(tf.expand_dims(output_image_test, 0), -1),
-                        tf.expand_dims(tf.expand_dims(target, 0), -1),
-                        max_val=1.0, filter_size=args.ssim_filter_size,
-                        filter_sigma=1.5, k1=0.01, k2=0.1
-                    )
-                    loss_holdout["ssim"] = (ssim_weight, ssim_intensity_loss)
-                    l2_intensity_loss = img2mse(output_image_test, target)
-                    loss_holdout["l2"] = (l2_weight, l2_intensity_loss)
-
-                total_loss_holdout = 0.
-                for loss_value in loss_holdout.values():
-                    total_loss_holdout += loss_value[0] * loss_value[1]
-
+                loss_holdout = hybrid_loss(target_image=target, pred_image=output_image_test, ssim_filter_size=args.ssim_filter_size,
+                                           ssim_weight=args.ssim_lambda, loss_type=args.loss)
+                wandb.log({"infer_L2": loss_holdout['l2'][1], "infer_SSIM": loss_holdout['ssim'][1], "infer_loss": loss_holdout['total'][1]},
+                          step=i)
                 # Save out the validation image for Tensorboard-free monitoring
                 testimgdir = os.path.join(basedir, expname, 'tboard_val_imgs')
                 # if i==0:
@@ -223,7 +173,7 @@ def train():
                         tf.contrib.summary.scalar(f'test/loss_{l_key}/', l_value[0])
                         tf.contrib.summary.scalar(f'test/penalty_factor_{l_key}/', l_value[1])
                         tf.contrib.summary.scalar(f'test/total_loss_{l_key}/', l_value[0] * l_value[1])
-                    tf.contrib.summary.scalar('test/total_loss/', total_loss)
+                    tf.contrib.summary.scalar('test/total_loss/', loss_holdout['total'][1])
                     tf.contrib.summary.image('b_mode/target/',
                                              tf.expand_dims(tf.expand_dims(to8b(tf.transpose(target)), 0), -1))
                     for map_k, map_v in rendering_output_test.items():

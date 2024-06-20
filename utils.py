@@ -1,10 +1,29 @@
+import argparse
+import os
+
 import numpy as np
 import tensorflow as tf
 from matplotlib import pyplot as plt
 import io
 import jax.numpy as jnp
-
+from typing import Optional
 tf.compat.v1.enable_eager_execution()
+
+
+def create_log(args: argparse.Namespace):
+    basedir = args.basedir
+    expname = args.expname
+    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
+    f = os.path.join(basedir, expname, 'args.txt')
+    with open(f, 'w') as file:
+        for arg in sorted(vars(args)):
+            attr = getattr(args, arg)
+            file.write('{} = {}\n'.format(arg, attr))
+    if args.config is not None:
+        f = os.path.join(basedir, expname, 'config.txt')
+        with open(f, 'w') as file:
+            file.write(open(args.config, 'r').read())
+        return basedir, expname
 
 
 def batchify(fn, chunk):
@@ -17,6 +36,7 @@ def batchify(fn, chunk):
 
     return ret
 
+
 # Misc utils
 def show_colorbar(image, cmap='rainbow'):
     figure = plt.figure(figsize=(5, 5))
@@ -28,10 +48,38 @@ def show_colorbar(image, cmap='rainbow'):
     plt.close(figure)
     return buf
 
+
 def img2mse(x, y): return tf.reduce_mean(tf.square(x - y))
 
 
+def hybrid_loss(target_image: np.ndarray,
+                pred_image: np.ndarray,
+                ssim_filter_size,
+                ssim_weight: Optional[float],
+                loss_type: str = 'ssim') -> float:
+
+    l2_loss = img2mse(pred_image, target_image)
+    ssim_loss = 1. - tf.image.ssim_multiscale(tf.expand_dims(tf.expand_dims(pred_image, 0), -1),
+                                              tf.expand_dims(tf.expand_dims(target_image, 0), -1),
+                                              max_val=1.0, filter_size=ssim_filter_size,
+                                              filter_sigma=1.5, k1=0.01, k2=0.1)
+
+    if loss_type == 'l2':
+        ssim_weight = 0
+    loss = {'l2': (1 if loss_type == 'l2' else 1-ssim_weight, l2_loss),
+            'ssim': (0 if loss_type == 'l2' else ssim_weight, ssim_loss)}
+    loss['total'] = (1, loss['l2'][0]*loss['l2'][1]+loss['ssim'][0]*loss['ssim'][1])
+    return loss
+
+
 def mse2psnr(x): return -10.*tf.log(x)/tf.log(10.)
+
+
+def save_weights(net, prefix, i, basedir, expname):
+    path = os.path.join(
+        basedir, expname, '{}_{:06d}.npy'.format(prefix, i))
+    np.save(path, net.get_weights())
+    print('saved weights at', path)
 
 
 def patch_l2(y, y_prim):

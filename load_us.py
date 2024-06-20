@@ -207,12 +207,12 @@ def spherify_poses(poses, bds):
 
 def load_us_data(basedir):
     poses, imgs = _load_data(basedir)
-    print('Loaded', basedir)
+    print('loaded data from', basedir)
     images = imgs
 
     c2w = poses_avg(poses)
-    print('Data:')
-    print(poses.shape, images.shape, )
+    print(f'poses.shape = {poses.shape}')
+    print(f'images.shape = {images.shape}')
 
     dists = np.sum(np.square(c2w[:3, 3] - poses[:, :3, 3]), -1)
     i_test = np.argmin(dists)
